@@ -9,10 +9,10 @@
    ========================================================= */
 #if defined(__AVR_ATmega8__)
     #define MCU_ATMEGA8
-#elif defined(__AVR_ATmega88__)  || \
-      defined(__AVR_ATmega88P__) || \
-      defined(__AVR_ATmega88PA__)
+    #define TIMER0_ISR_VECTOR TIMER0_OVF_vect
+#elif defined(__AVR_ATmega88__)
     #define MCU_ATMEGA88
+    #define TIMER0_ISR_VECTOR TIMER0_COMPA_vect
 #else
     #error "Unsupported MCU"
 #endif
@@ -80,7 +80,7 @@ static inline uint8_t pressed(volatile uint8_t *pin, uint8_t bit)
    Timer0 — ~1 ms timeout watchdog
    ========================================================= */
 
-ISR(TIMER0_COMPA_vect)
+ISR(TIMER0_ISR_VECTOR)
 {
     if (++th_timeout > 12) {
         cycle = 0;        // reset to 3-button mode
@@ -135,11 +135,25 @@ int main(void)
     SEGA_DDR  = 0x00;
     SEGA_PORT = 0x00;
 
-    /* ---- Timer0 setup (CTC, ~1 ms @ 8 MHz) ---- */
-    TCCR0A = (1 << WGM01);
-    TCCR0B = (1 << CS01) | (1 << CS00);   // clk / 64
-    OCR0A  = 124;
-    TIMSK0 = (1 << OCIE0A);
+#ifdef MCU_ATMEGA8
+
+    /* -------- Timer0: NORMAL MODE, overflow only -------- */
+
+    TCCR0 = (1 << CS01) | (1 << CS00);   /* prescaler clk/64 */
+    TCNT0 = 256 - 124;                   /* preload for timing */
+    TIMSK |= (1 << TOIE0);               /* enable overflow ISR */
+
+#else
+
+    /* -------- Timer0: CTC mode (ATmega88+) -------- */
+
+    TCCR0A = (1 << WGM01);               /* CTC mode */
+    TCCR0B = (1 << CS01) | (1 << CS00);  /* prescaler clk/64 */
+    OCR0A  = 124;                        /* compare value */
+    TIMSK0 = (1 << OCIE0A);              /* enable compare ISR */
+
+#endif
+
 
     sei();
 
