@@ -1,203 +1,205 @@
+/*
+ * Sega Mega Drive / Genesis controller
+ * 3-button + proper 6-button extension
+ *
+ * MCU: ATmega8 / ATmega88
+ * Clock: 8 MHz (internal)
+ */
+
 #include <avr/io.h>
 #include <avr/interrupt.h>
+#include <stdbool.h>
 #include <stdint.h>
 
-/* =========================================================
-   MCU auto-detection
-   ========================================================= */
-#if defined(__AVR_ATmega8__)
-    #define MCU_ATMEGA8
-    #define TIMER0_ISR_VECTOR TIMER0_OVF_vect
-#elif defined(__AVR_ATmega88__)
-    #define MCU_ATMEGA88
-    #define TIMER0_ISR_VECTOR TIMER0_COMPA_vect
-#else
-    #error "Unsupported MCU"
-#endif
+/* ================= Sega DB9 mapping =================
+ *
+ * PD2  UP / X
+ * PD3  DOWN / Y
+ * PD4  LEFT / Z
+ * PD5  RIGHT / MODE
+ * PD6  A / B
+ * PD7  START / C
+ *
+ * PB0  TH / SELECT (input from console)
+ *
+ * All outputs are ACTIVE LOW
+ */
 
-/* =========================================================
-   Sega interface (shared pins to console)
-   ========================================================= */
+/* ================= Button source =================
+ * Replace these macros with your real button inputs
+ */
+#define BTN_UP()     PB0
+#define BTN_RIGHT()  PB1
+#define BTN_DOWN()   PB2
+#define BTN_LEFT()   PB3
+#define BTN_START()  PB4
+#define BTN_A()      PB5
+#define BTN_B()      PC0
+#define BTN_C()      PC4
+#define BTN_MODE()   PC5
+#define BTN_X()      PC3
+#define BTN_Y()      PC2
+#define BTN_Z()      PC1
 
-/* TH / SELECT input from console */
-#define TH_BIT     PD3
-#define TH_PINREG  PIND
 
-/* Sega shared lines (open-collector via DDR) */
-#define SEGA_PORT  PORTB
-#define SEGA_DDR   DDRB
+/* ================= Internal state ================= */
 
-#define PIN_LX     PD0   // LEFT / X
-#define PIN_RM     PC3   // RIGHT / MODE
-#define PIN_UZ     PC2   // UP / Z
-#define PIN_DY     PC1   // DOWN / Y
-#define PIN_BA     PC5   // B / A
-#define PIN_CS     PC4   // C / START
+static volatile uint8_t phase = 0;
+static volatile uint8_t isSix = 0;
+static volatile uint8_t prevTH = 1;
+static volatile uint8_t idleTicks = 0;
 
-/* =========================================================
-   Button inputs (physical buttons)
-   ========================================================= */
+/* ================= Helpers ================= */
 
-#define BTN_PORTC  PINC
-#define BTN_UP     PD4
-#define BTN_DOWN   PB6
-#define BTN_LEFT   PB7
-#define BTN_RIGHT  PD5
-
-#define BTN_A      PD7
-#define BTN_B      PB0
-#define BTN_C      PB1
-#define BTN_START  PD6
-
-#define BTN_X      PB4
-#define BTN_Y      PB5
-#define BTN_Z      PB2
-#define BTN_MODE   PC0
-
-/* =========================================================
-   Internal state
-   ========================================================= */
-
-volatile uint8_t cycle = 0;
-volatile uint8_t prev_th = 1;
-volatile uint8_t th_timeout = 0;
-
-/* =========================================================
-   Helpers
-   ========================================================= */
-
-static inline uint8_t pressed(volatile uint8_t *pin, uint8_t bit)
+static inline void writeLo(uint8_t pin)
 {
-    return !(*pin & (1 << bit));
+    PORTD &= ~(1 << pin);
 }
 
-#define DRIVE_LOW(bit)   (SEGA_DDR |=  (1 << (bit)))
-#define RELEASE(bit)     (SEGA_DDR &= ~(1 << (bit)))
-
-/* =========================================================
-   Timer0 — ~1 ms timeout watchdog
-   ========================================================= */
-
-ISR(TIMER0_ISR_VECTOR)
+static inline void writeHi(uint8_t pin)
 {
-    if (++th_timeout > 12) {
-        cycle = 0;        // reset to 3-button mode
+    PORTD |= (1 << pin);
+}
+
+static inline uint8_t th_level(void)
+{
+    return (PINB & (1 << PB0)) ? 1 : 0;
+}
+
+/* ================= Timer0 overflow (~1 ms) ================= */
+
+ISR(TIMER0_OVF_vect)
+{
+    if (++idleTicks > 12) {
+        phase = 0;
+        isSix = 0;     /* fallback to 3-button */
     }
 }
 
-/* =========================================================
-   TH falling-edge detection
-   ========================================================= */
+/* ================= TH polling ================= */
 
-static inline void handle_th(void)
+static inline void sega_poll_th(void)
 {
-    uint8_t th = (TH_PINREG & (1 << TH_BIT)) ? 1 : 0;
+    uint8_t th = th_level();
 
-    if (prev_th && !th) {      // FALLING edge only
-        if (cycle < 7) cycle++;
-        th_timeout = 0;
-    }
-    prev_th = th;
-}
+    if (th != prevTH) {
+        prevTH = th;
+        idleTicks = 0;
 
-/* =========================================================
-   Main
-   ========================================================= */
-
-int main(void)
-{
-    /* ---- Disable all analog functions ---- */
-    ADCSRA &= ~(1 << ADEN);   // Disable ADC
-    ACSR   |=  (1 << ACD);    // Disable analog comparator
-
-#ifdef MCU_ATMEGA88
-    DIDR0 = 0x00;             // Keep ADC pins as digital I/O
-#endif
-
-    /* ---- Button inputs with pull-ups ---- */
-    DDRC = 0x00;
-    PORTC = 0x3F;
-
-    DDRD &= ~(1 << TH_BIT);
-    PORTD |= (1 << TH_BIT);
-
-    DDRD &= ~((1 << BTN_A) | (1 << BTN_START) |
-              (1 << BTN_X) | (1 << BTN_Y) | (1 << BTN_Z));
-    PORTD |= (1 << BTN_A) | (1 << BTN_START) |
-             (1 << BTN_X) | (1 << BTN_Y) | (1 << BTN_Z);
-
-    DDRB &= ~(1 << BTN_MODE);
-    PORTB |= (1 << BTN_MODE);
-
-    /* ---- Sega lines released (Hi-Z) ---- */
-    SEGA_DDR  = 0x00;
-    SEGA_PORT = 0x00;
-
-#ifdef MCU_ATMEGA8
-
-    /* -------- Timer0: NORMAL MODE, overflow only -------- */
-
-    TCCR0 = (1 << CS01) | (1 << CS00);   /* prescaler clk/64 */
-    TCNT0 = 256 - 124;                   /* preload for timing */
-    TIMSK |= (1 << TOIE0);               /* enable overflow ISR */
-
-#else
-
-    /* -------- Timer0: CTC mode (ATmega88+) -------- */
-
-    TCCR0A = (1 << WGM01);               /* CTC mode */
-    TCCR0B = (1 << CS01) | (1 << CS00);  /* prescaler clk/64 */
-    OCR0A  = 124;                        /* compare value */
-    TIMSK0 = (1 << OCIE0A);              /* enable compare ISR */
-
-#endif
-
-
-    sei();
-
-    while (1)
-    {
-        handle_th();
-
-        /* Release all Sega lines */
-        RELEASE(PIN_LX); RELEASE(PIN_RM); RELEASE(PIN_UZ);
-        RELEASE(PIN_DY); RELEASE(PIN_BA); RELEASE(PIN_CS);
-
-        switch (cycle)
-        {
-            case 0:
-            case 1:
-            case 2:
-                if (pressed(&BTN_PORTC, BTN_LEFT))  DRIVE_LOW(PIN_LX);
-                if (pressed(&BTN_PORTC, BTN_RIGHT)) DRIVE_LOW(PIN_RM);
-                if (pressed(&BTN_PORTC, BTN_UP))    DRIVE_LOW(PIN_UZ);
-                if (pressed(&BTN_PORTC, BTN_DOWN))  DRIVE_LOW(PIN_DY);
-                break;
-
-            case 3:
-                if (pressed(&PIND, BTN_A))     DRIVE_LOW(PIN_BA);
-                if (pressed(&PIND, BTN_START)) DRIVE_LOW(PIN_CS);
-                if (pressed(&BTN_PORTC, BTN_B)) DRIVE_LOW(PIN_BA);
-                if (pressed(&BTN_PORTC, BTN_C)) DRIVE_LOW(PIN_CS);
-                break;
-
-            case 4:
-                /* 6-button ID phase: all released */
-                break;
-
-            case 5:
-            case 7:
-                if (pressed(&PIND, BTN_X))    DRIVE_LOW(PIN_LX);
-                if (pressed(&PINB, BTN_MODE)) DRIVE_LOW(PIN_RM);
-                if (pressed(&PIND, BTN_Z))    DRIVE_LOW(PIN_UZ);
-                if (pressed(&PIND, BTN_Y))    DRIVE_LOW(PIN_DY);
-                break;
-
-            case 6:
-                if (pressed(&PIND, BTN_A))     DRIVE_LOW(PIN_BA);
-                if (pressed(&PIND, BTN_START)) DRIVE_LOW(PIN_CS);
-                break;
+        if (++phase >= 8) {
+            phase = 0;
+            isSix = 1;   /* successful 6-button detect */
         }
     }
 }
 
+/* ================= Sega output ================= */
+
+static inline void sega_output(void)
+{
+    uint8_t th = th_level();
+
+    /* release all lines */
+    writeHi(PD2); writeHi(PD3); writeHi(PD4);
+    writeHi(PD5); writeHi(PD6); writeHi(PD7);
+
+    /* ---------- 3 BUTTON MODE ---------- */
+    if (!isSix) {
+        if (th) {
+            BTN_B() ? writeLo(PD6) : writeHi(PD6);
+            BTN_C() ? writeLo(PD7) : writeHi(PD7);
+        } else {
+            BTN_UP()    ? writeLo(PD2) : writeHi(PD2);
+            BTN_DOWN()  ? writeLo(PD3) : writeHi(PD3);
+            BTN_LEFT()  ? writeLo(PD4) : writeHi(PD4);
+            BTN_RIGHT() ? writeLo(PD5) : writeHi(PD5);
+            BTN_A()     ? writeLo(PD6) : writeHi(PD6);
+            BTN_START() ? writeLo(PD7) : writeHi(PD7);
+        }
+        return;
+    }
+
+    /* ---------- 6 BUTTON MODE ---------- */
+    switch (phase) {
+
+    case 0:
+    case 1:
+    case 2:
+        if (!th) {
+            BTN_UP()    ? writeLo(PD2) : writeHi(PD2);
+            BTN_DOWN()  ? writeLo(PD3) : writeHi(PD3);
+            BTN_LEFT()  ? writeLo(PD4) : writeHi(PD4);
+            BTN_RIGHT() ? writeLo(PD5) : writeHi(PD5);
+        }
+        break;
+
+    case 3:
+        if (th) {
+            BTN_B() ? writeLo(PD6) : writeHi(PD6);
+            BTN_C() ? writeLo(PD7) : writeHi(PD7);
+        } else {
+            BTN_A()     ? writeLo(PD6) : writeHi(PD6);
+            BTN_START() ? writeLo(PD7) : writeHi(PD7);
+        }
+        break;
+
+    case 4:
+        /* 6-button ID phase */
+        writeLo(PD2); writeLo(PD3);
+        writeLo(PD4); writeLo(PD5);
+        break;
+
+    case 5:
+        if (!th) {
+            BTN_X()    ? writeLo(PD2) : writeHi(PD2);
+            BTN_Y()    ? writeLo(PD3) : writeHi(PD3);
+            BTN_Z()    ? writeLo(PD4) : writeHi(PD4);
+            BTN_MODE() ? writeLo(PD5) : writeHi(PD5);
+        }
+        break;
+    }
+}
+
+/* ================= Main ================= */
+
+int main(void)
+{
+    /* Disable ADC (digital I/O only) */
+    ADCSRA &= ~(1 << ADEN);
+
+    /* PD2–PD7 outputs */
+    DDRD |= (1 << PD2) | (1 << PD3) | (1 << PD4) |
+            (1 << PD5) | (1 << PD6) | (1 << PD7);
+
+    /* TH input */
+    DDRB &= ~(1 << PB0);
+
+#if defined(__AVR_ATmega8__)
+    /* ---------- ATmega8 : Timer0 overflow ---------- */
+    /* F_CPU = 8 MHz
+    * Prescaler = 64
+    * Overflow period ≈ 2.048 ms
+    */
+
+    TCCR0 = (1 << CS01) | (1 << CS00);   /* clk/64 */
+    TIMSK |= (1 << TOIE0);              /* enable overflow interrupt */
+#elif defined(__AVR_ATmega88__) || defined(__AVR_ATmega88A__) || defined(__AVR_ATmega88PA__)
+    /* ---------- ATmega88 / ATmega88A / ATmega88PA / ATmega88PB ---------- */
+    /* F_CPU = 8 MHz
+    * Prescaler = 64
+    * OCR0A = 124 → 1 ms
+    */
+
+    TCCR0A = (1 << WGM01);               /* CTC */
+    TCCR0B = (1 << CS01) | (1 << CS00);  /* clk/64 */
+    OCR0A  = 124;
+    TIMSK0 = (1 << OCIE0A);
+#endif
+
+    sei();
+
+    while (1) {
+        sega_poll_th();
+        sega_output();
+    }
+}
