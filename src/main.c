@@ -20,26 +20,27 @@
  * PD6  A / B
  * PD7  START / C
  *
- * PB0  TH / SELECT (input from console)
+ * PB7  TH / SELECT (input from console)
  *
  * All outputs are ACTIVE LOW
  */
 
 /* ================= Button source =================
  * Replace these macros with your real button inputs
+ * Note: Buttons are assumed to be active-low (pressed = LOW)
  */
-#define BTN_UP()     PB0
-#define BTN_RIGHT()  PB1
-#define BTN_DOWN()   PB2
-#define BTN_LEFT()   PB3
-#define BTN_START()  PB4
-#define BTN_A()      PB5
-#define BTN_B()      PC0
-#define BTN_C()      PC4
-#define BTN_MODE()   PC5
-#define BTN_X()      PC3
-#define BTN_Y()      PC2
-#define BTN_Z()      PC1
+#define BTN_UP()     ((PINB & (1 << PB0)) == 0)
+#define BTN_RIGHT()  ((PINB & (1 << PB1)) == 0)
+#define BTN_DOWN()   ((PINB & (1 << PB2)) == 0)
+#define BTN_LEFT()   ((PINB & (1 << PB3)) == 0)
+#define BTN_START()  ((PINB & (1 << PB4)) == 0)
+#define BTN_A()      ((PINB & (1 << PB5)) == 0)
+#define BTN_B()      ((PINC & (1 << PC0)) == 0)
+#define BTN_C()      ((PINC & (1 << PC4)) == 0)
+#define BTN_MODE()   ((PINC & (1 << PC5)) == 0)
+#define BTN_X()      ((PINC & (1 << PC3)) == 0)
+#define BTN_Y()      ((PINC & (1 << PC2)) == 0)
+#define BTN_Z()      ((PINC & (1 << PC1)) == 0)
 
 
 /* ================= Internal state ================= */
@@ -63,12 +64,16 @@ static inline void writeHi(uint8_t pin)
 
 static inline uint8_t th_level(void)
 {
-    return (PINB & (1 << PB0)) ? 1 : 0;
+    return (PINB & (1 << PB7)) ? 1 : 0;
 }
 
 /* ================= Timer0 overflow (~1 ms) ================= */
 
+#if defined(__AVR_ATmega8__)
 ISR(TIMER0_OVF_vect)
+#else
+ISR(TIMER0_COMPA_vect)
+#endif
 {
     if (++idleTicks > 12) {
         phase = 0;
@@ -171,8 +176,16 @@ int main(void)
     DDRD |= (1 << PD2) | (1 << PD3) | (1 << PD4) |
             (1 << PD5) | (1 << PD6) | (1 << PD7);
 
-    /* TH input */
-    DDRB &= ~(1 << PB0);
+    /* TH input (PB7) */
+    DDRB &= ~(1 << PB7);
+    
+    /* Button inputs: PB1-PB5 */
+    DDRB &= ~((1 << PB1) | (1 << PB2) | (1 << PB3) | (1 << PB4) | (1 << PB5));
+    PORTB |= (1 << PB1) | (1 << PB2) | (1 << PB3) | (1 << PB4) | (1 << PB5);  /* Enable pull-ups */
+    
+    /* Button inputs: PC0-PC5 */
+    DDRC &= ~((1 << PC0) | (1 << PC1) | (1 << PC2) | (1 << PC3) | (1 << PC4) | (1 << PC5));
+    PORTC |= (1 << PC0) | (1 << PC1) | (1 << PC2) | (1 << PC3) | (1 << PC4) | (1 << PC5);  /* Enable pull-ups */
 
 #if defined(__AVR_ATmega8__)
     /* ---------- ATmega8 : Timer0 overflow ---------- */
