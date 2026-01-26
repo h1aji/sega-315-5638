@@ -162,6 +162,12 @@ static inline void sega_output(void)
             BTN_MODE() ? writeLo(PD5) : writeHi(PD5);
         }
         break;
+
+    case 6:
+    case 7:
+        /* These phases are not used in 6-button mode output */
+        /* Controller should be idle during these phases */
+        break;
     }
 }
 
@@ -179,9 +185,9 @@ int main(void)
     /* TH input (PB7) */
     DDRB &= ~(1 << PB7);
     
-    /* Button inputs: PB1-PB5 */
-    DDRB &= ~((1 << PB1) | (1 << PB2) | (1 << PB3) | (1 << PB4) | (1 << PB5));
-    PORTB |= (1 << PB1) | (1 << PB2) | (1 << PB3) | (1 << PB4) | (1 << PB5);  /* Enable pull-ups */
+    /* Button inputs: PB0-PB5 */
+    DDRB &= ~((1 << PB0) | (1 << PB1) | (1 << PB2) | (1 << PB3) | (1 << PB4) | (1 << PB5));
+    PORTB |= (1 << PB0) | (1 << PB1) | (1 << PB2) | (1 << PB3) | (1 << PB4) | (1 << PB5);  /* Enable pull-ups */
     
     /* Button inputs: PC0-PC5 */
     DDRC &= ~((1 << PC0) | (1 << PC1) | (1 << PC2) | (1 << PC3) | (1 << PC4) | (1 << PC5));
@@ -195,7 +201,8 @@ int main(void)
     */
 
     TCCR0 = (1 << CS01) | (1 << CS00);   /* clk/64 */
-    TIMSK |= (1 << TOIE0);              /* enable overflow interrupt */
+    TCNT0 = 0;                           /* initialize counter */
+    TIMSK |= (1 << TOIE0);               /* enable overflow interrupt */
 #elif defined(__AVR_ATmega88__) || defined(__AVR_ATmega88A__) || defined(__AVR_ATmega88PA__)
     /* ---------- ATmega88 / ATmega88A / ATmega88PA / ATmega88PB ---------- */
     /* F_CPU = 8 MHz
@@ -205,6 +212,7 @@ int main(void)
 
     TCCR0A = (1 << WGM01);               /* CTC */
     TCCR0B = (1 << CS01) | (1 << CS00);  /* clk/64 */
+    TCNT0  = 0;                          /* initialize counter */
     OCR0A  = 124;
     TIMSK0 = (1 << OCIE0A);
 #endif
