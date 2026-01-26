@@ -75,9 +75,17 @@ ISR(TIMER0_OVF_vect)
 ISR(TIMER0_COMPA_vect)
 #endif
 {
-    if (++idleTicks > 12) {
+    /* Increment idleTicks atomically */
+    uint8_t ticks = idleTicks;
+    ticks++;
+    idleTicks = ticks;
+
+    if (ticks > 12) {
+        /* Disable interrupts to prevent race condition with main loop */
+        cli();
         phase = 0;
         isSix = 0;     /* fallback to 3-button */
+        sei();
     }
 }
 
@@ -91,10 +99,15 @@ static inline void sega_poll_th(void)
         prevTH = th;
         idleTicks = 0;
 
-        if (++phase >= 8) {
-            phase = 0;
+        /* Disable interrupts to prevent race condition with ISR */
+        cli();
+        uint8_t p = phase;
+        if (++p >= 8) {
+            p = 0;
             isSix = 1;   /* successful 6-button detect */
         }
+        phase = p;
+        sei();
     }
 }
 
@@ -182,7 +195,7 @@ int main(void)
     DDRD |= (1 << PD2) | (1 << PD3) | (1 << PD4) |
             (1 << PD5) | (1 << PD6) | (1 << PD7);
 
-    /* TH input (PB7) */
+    /* TH input (PB7) - no pull-up needed, console drives it */
     DDRB &= ~(1 << PB7);
     
     /* Button inputs: PB0-PB5 */
@@ -196,9 +209,10 @@ int main(void)
 #if defined(__AVR_ATmega8__)
     /* ---------- ATmega8 : Timer0 overflow ---------- */
     /* F_CPU = 8 MHz
-    * Prescaler = 64
-    * Overflow period ≈ 2.048 ms
-    */
+     * Prescaler = 64
+     * Overflow period ≈ 2.048 ms
+     * idleTicks > 12 gives ~24.6 ms timeout
+     */
 
     TCCR0 = (1 << CS01) | (1 << CS00);   /* clk/64 */
     TCNT0 = 0;                           /* initialize counter */
