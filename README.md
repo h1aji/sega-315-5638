@@ -258,12 +258,12 @@ To verify correct operation:
 
 ## Status
 
-✅ Verified protocol logic against multiple sources
-✅ Correct 6-button identification sequence (all 4 pins LOW in phase 4)
-✅ Proper shared-pin multiplexing behavior
-✅ Safe for real consoles
-✅ ATmega8 & ATmega88 compatible
-✅ Tested timing requirements (4-7µs pulses, 20ms polling)
+- Verified protocol logic against multiple sources
+- Correct 6-button identification sequence (all 4 pins LOW in phase 4)
+- Proper shared-pin multiplexing behavior
+- Safe for real consoles
+- ATmega8 & ATmega88 compatible
+- Tested timing requirements (4-7µs pulses, 20ms polling)
 
 ---
 
