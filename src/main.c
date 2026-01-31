@@ -1,6 +1,7 @@
 /*
  * Sega Mega Drive / Genesis controller
  * 3-button + proper 6-button extension
+ * Emulates SEGA 315-5638 chip
  *
  * MCU: ATmega8 / ATmega88
  * Clock: 8 MHz (internal)
@@ -13,9 +14,9 @@
 
 /* ================= Sega DB9 mapping =================
  *
- * PD2  UP / X
+ * PD2  UP / Z
  * PD3  DOWN / Y
- * PD4  LEFT / Z
+ * PD4  LEFT / X
  * PD5  RIGHT / MODE
  * PD6  A / B
  * PD7  START / C
@@ -117,20 +118,26 @@ static inline void sega_output(void)
 {
     uint8_t th = th_level();
 
-    /* release all lines */
+    /* Release all lines first */
     writeHi(PD2); writeHi(PD3); writeHi(PD4);
     writeHi(PD5); writeHi(PD6); writeHi(PD7);
 
     /* ---------- 3 BUTTON MODE ---------- */
     if (!isSix) {
+        /* UP and DOWN are ALWAYS available */
+        BTN_UP()   ? writeLo(PD2) : writeHi(PD2);
+        BTN_DOWN() ? writeLo(PD3) : writeHi(PD3);
+        
         if (th) {
+            /* TH HIGH: directional left/right + B/C */
+            BTN_LEFT()  ? writeLo(PD4) : writeHi(PD4);
+            BTN_RIGHT() ? writeLo(PD5) : writeHi(PD5);
             BTN_B() ? writeLo(PD6) : writeHi(PD6);
             BTN_C() ? writeLo(PD7) : writeHi(PD7);
         } else {
-            BTN_UP()    ? writeLo(PD2) : writeHi(PD2);
-            BTN_DOWN()  ? writeLo(PD3) : writeHi(PD3);
-            BTN_LEFT()  ? writeLo(PD4) : writeHi(PD4);
-            BTN_RIGHT() ? writeLo(PD5) : writeHi(PD5);
+            /* TH LOW: ground on pins 3-4 + A/START */
+            writeLo(PD4); /* Ground on pin 3 */
+            writeLo(PD5); /* Ground on pin 4 */
             BTN_A()     ? writeLo(PD6) : writeHi(PD6);
             BTN_START() ? writeLo(PD7) : writeHi(PD7);
         }
@@ -138,48 +145,85 @@ static inline void sega_output(void)
     }
 
     /* ---------- 6 BUTTON MODE ---------- */
+    /* Phase counter increments on every TH edge change:
+     * Phase 0: Pulse 1 LOW
+     * Phase 1: Pulse 1 HIGH
+     * Phase 2: Pulse 2 LOW
+     * Phase 3: Pulse 2 HIGH
+     * Phase 4: Pulse 3 LOW  - IDENTIFICATION (all 4 directional pins LOW)
+     * Phase 5: Pulse 3 HIGH - X/Y/Z/MODE readable
+     * Phase 6: Pulse 4 LOW  - Reset phase
+     * Phase 7: Pulse 4 HIGH - Back to idle
+     */
+    
     switch (phase) {
 
-    case 0:
-    case 1:
-    case 2:
-        if (!th) {
-            BTN_UP()    ? writeLo(PD2) : writeHi(PD2);
-            BTN_DOWN()  ? writeLo(PD3) : writeHi(PD3);
-            BTN_LEFT()  ? writeLo(PD4) : writeHi(PD4);
-            BTN_RIGHT() ? writeLo(PD5) : writeHi(PD5);
-        }
+    case 0: // Pulse 1 LOW
+    case 2: // Pulse 2 LOW
+        /* UP and DOWN always available */
+        BTN_UP()   ? writeLo(PD2) : writeHi(PD2);
+        BTN_DOWN() ? writeLo(PD3) : writeHi(PD3);
+        /* LEFT/RIGHT grounded for 3-button compatibility */
+        writeLo(PD4);
+        writeLo(PD5);
+        /* A and START available */
+        BTN_A()     ? writeLo(PD6) : writeHi(PD6);
+        BTN_START() ? writeLo(PD7) : writeHi(PD7);
         break;
 
-    case 3:
-        if (th) {
-            BTN_B() ? writeLo(PD6) : writeHi(PD6);
-            BTN_C() ? writeLo(PD7) : writeHi(PD7);
-        } else {
-            BTN_A()     ? writeLo(PD6) : writeHi(PD6);
-            BTN_START() ? writeLo(PD7) : writeHi(PD7);
-        }
+    case 1: // Pulse 1 HIGH
+    case 3: // Pulse 2 HIGH
+        /* Normal directional + B/C */
+        BTN_UP()    ? writeLo(PD2) : writeHi(PD2);
+        BTN_DOWN()  ? writeLo(PD3) : writeHi(PD3);
+        BTN_LEFT()  ? writeLo(PD4) : writeHi(PD4);
+        BTN_RIGHT() ? writeLo(PD5) : writeHi(PD5);
+        BTN_B()     ? writeLo(PD6) : writeHi(PD6);
+        BTN_C()     ? writeLo(PD7) : writeHi(PD7);
         break;
 
-    case 4:
-        /* 6-button ID phase */
-        writeLo(PD2); writeLo(PD3);
-        writeLo(PD4); writeLo(PD5);
+    case 4: // Pulse 3 LOW - IDENTIFICATION PHASE
+        /* ALL FOUR directional pins LOW for 6-button identification
+         * This tells the console we are a 6-button controller */
+        writeLo(PD2); // UP = LOW
+        writeLo(PD3); // DOWN = LOW
+        writeLo(PD4); // LEFT = LOW
+        writeLo(PD5); // RIGHT = LOW
+        /* A and START still available */
+        BTN_A()     ? writeLo(PD6) : writeHi(PD6);
+        BTN_START() ? writeLo(PD7) : writeHi(PD7);
         break;
 
-    case 5:
-        if (!th) {
-            BTN_X()    ? writeLo(PD2) : writeHi(PD2);
-            BTN_Y()    ? writeLo(PD3) : writeHi(PD3);
-            BTN_Z()    ? writeLo(PD4) : writeHi(PD4);
-            BTN_MODE() ? writeLo(PD5) : writeHi(PD5);
-        }
+    case 5: // Pulse 3 HIGH - X/Y/Z/MODE READABLE
+        /* X/Y/Z on directional pins, MODE on RIGHT pin */
+        BTN_Z()    ? writeLo(PD2) : writeHi(PD2);  // Z on UP pin (PIN 1)
+        BTN_Y()    ? writeLo(PD3) : writeHi(PD3);  // Y on DOWN pin (PIN 2)
+        BTN_X()    ? writeLo(PD4) : writeHi(PD4);  // X on LEFT pin (PIN 3)
+        BTN_MODE() ? writeLo(PD5) : writeHi(PD5);  // MODE on RIGHT pin (PIN 4)
+        BTN_B()    ? writeLo(PD6) : writeHi(PD6);  // B still available (PIN 6)
+        BTN_C()    ? writeLo(PD7) : writeHi(PD7);  // C still available (PIN 9)
         break;
 
-    case 6:
-    case 7:
-        /* These phases are not used in 6-button mode output */
-        /* Controller should be idle during these phases */
+    case 6: // Pulse 4 LOW - Reset phase
+        /* UP and DOWN available again */
+        BTN_UP()   ? writeLo(PD2) : writeHi(PD2);
+        BTN_DOWN() ? writeLo(PD3) : writeHi(PD3);
+        /* LEFT/RIGHT grounded */
+        writeLo(PD4);
+        writeLo(PD5);
+        /* A and START available */
+        BTN_A()     ? writeLo(PD6) : writeHi(PD6);
+        BTN_START() ? writeLo(PD7) : writeHi(PD7);
+        break;
+
+    case 7: // Pulse 4 HIGH - Back to idle/normal
+        /* Back to normal state - same as phases 1 and 3 */
+        BTN_UP()    ? writeLo(PD2) : writeHi(PD2);
+        BTN_DOWN()  ? writeLo(PD3) : writeHi(PD3);
+        BTN_LEFT()  ? writeLo(PD4) : writeHi(PD4);
+        BTN_RIGHT() ? writeLo(PD5) : writeHi(PD5);
+        BTN_B()     ? writeLo(PD6) : writeHi(PD6);
+        BTN_C()     ? writeLo(PD7) : writeHi(PD7);
         break;
     }
 }
