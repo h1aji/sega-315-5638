@@ -26,6 +26,11 @@
  * All outputs are ACTIVE LOW
  */
 
+/* Mask of the six Sega data lines on PORTD (PD2..PD7).
+ * PD0/PD1 (RXD/TXD) are left untouched so we never disturb them. */
+#define SEGA_OUT_MASK ((1 << PD2) | (1 << PD3) | (1 << PD4) | \
+                       (1 << PD5) | (1 << PD6) | (1 << PD7))
+
 /* ================= Button source =================
  * Replace these macros with your real button inputs
  * Note: Buttons are assumed to be active-low (pressed = LOW)
@@ -46,29 +51,30 @@
 
 /* ================= Internal state ================= */
 
-static volatile uint8_t phase = 0;
-static volatile uint8_t isSix = 0;
+static volatile uint8_t phase = 7;
 static volatile uint8_t prevTH = 1;
 static volatile uint8_t idleTicks = 0;
 
-/* ================= Helpers ================= */
+/* ================= Timeout configuration =================
+ * The real 315-5638 resets its phase counter to the idle (3-button
+ * compatible) state after TH has been held high for ~1.5 ms. This MUST be
+ * shorter than the console's inter-poll gap (16.6 ms @ 60 Hz, 20 ms @ 50 Hz),
+ * otherwise a 3-button game that pulses TH once per frame drifts the phase
+ * counter and eventually feeds it 6-button identification / X-Y-Z-MODE data.
+ *
+ * Both MCUs are configured for a ~0.25 ms timer tick, so IDLE_TIMEOUT_TICKS
+ * gives the SAME real-world timeout (~1.5 ms) on every supported part.
+ */
+#define IDLE_TIMEOUT_TICKS 6   /* 6 x ~0.25 ms ~= 1.5 ms */
 
-static inline void writeLo(uint8_t pin)
-{
-    PORTD &= ~(1 << pin);
-}
-
-static inline void writeHi(uint8_t pin)
-{
-    PORTD |= (1 << pin);
-}
+/* ================= Helper ================= */
 
 static inline uint8_t th_level(void)
 {
     return (PINB & (1 << PB7)) ? 1 : 0;
 }
 
-/* ================= Timer0 overflow (~1 ms) ================= */
+/* ================= Timer0 overflow / compare (~0.25 ms) ================= */
 
 #if defined(__AVR_ATmega8__)
 ISR(TIMER0_OVF_vect)
@@ -76,75 +82,40 @@ ISR(TIMER0_OVF_vect)
 ISR(TIMER0_COMPA_vect)
 #endif
 {
-    /* Increment idleTicks atomically */
     uint8_t ticks = idleTicks;
-    ticks++;
+    if (ticks < 255) {          /* saturate instead of wrapping */
+        ticks++;
+    }
     idleTicks = ticks;
 
-    if (ticks > 12) {
-        /* Disable interrupts to prevent race condition with main loop */
-        cli();
-        phase = 0;
-        isSix = 0;     /* fallback to 3-button */
-        sei();
+    if (ticks >= IDLE_TIMEOUT_TICKS) {
+        /* Return to idle/high compatible state after inactivity timeout */
+        phase = 7;
     }
 }
 
 /* ================= TH polling ================= */
 
-static inline void sega_poll_th(void)
+static inline void sega_poll_th(uint8_t th)
 {
-    uint8_t th = th_level();
-
     if (th != prevTH) {
         prevTH = th;
         idleTicks = 0;
-
-        /* Disable interrupts to prevent race condition with ISR */
-        cli();
-        uint8_t p = phase;
-        if (++p >= 8) {
-            p = 0;
-            isSix = 1;   /* successful 6-button detect */
-        }
-        phase = p;
-        sei();
+        phase = (phase + 1) & 7;
     }
 }
 
 /* ================= Sega output ================= */
 
-static inline void sega_output(void)
+/* Drive the six data lines for the current (TH, phase).
+ * The full PORTD value is computed in a register and written ONCE, so there
+ * is no transient "all released" glitch and no intermediate port states for
+ * the console to sample. Active-LOW: a pressed button clears its bit. */
+static inline void sega_output(uint8_t th)
 {
-    uint8_t th = th_level();
+    uint8_t ph  = phase;        /* snapshot; the ISR may change phase */
+    uint8_t out = SEGA_OUT_MASK; /* all lines released (HIGH) */
 
-    /* Release all lines first */
-    writeHi(PD2); writeHi(PD3); writeHi(PD4);
-    writeHi(PD5); writeHi(PD6); writeHi(PD7);
-
-    /* ---------- 3 BUTTON MODE ---------- */
-    if (!isSix) {
-        /* UP and DOWN are ALWAYS available */
-        BTN_UP()   ? writeLo(PD2) : writeHi(PD2);
-        BTN_DOWN() ? writeLo(PD3) : writeHi(PD3);
-        
-        if (th) {
-            /* TH HIGH: directional left/right + B/C */
-            BTN_LEFT()  ? writeLo(PD4) : writeHi(PD4);
-            BTN_RIGHT() ? writeLo(PD5) : writeHi(PD5);
-            BTN_B() ? writeLo(PD6) : writeHi(PD6);
-            BTN_C() ? writeLo(PD7) : writeHi(PD7);
-        } else {
-            /* TH LOW: ground on pins 3-4 + A/START */
-            writeLo(PD4); /* Ground on pin 3 */
-            writeLo(PD5); /* Ground on pin 4 */
-            BTN_A()     ? writeLo(PD6) : writeHi(PD6);
-            BTN_START() ? writeLo(PD7) : writeHi(PD7);
-        }
-        return;
-    }
-
-    /* ---------- 6 BUTTON MODE ---------- */
     /* Phase counter increments on every TH edge change:
      * Phase 0: Pulse 1 LOW
      * Phase 1: Pulse 1 HIGH
@@ -155,130 +126,100 @@ static inline void sega_output(void)
      * Phase 6: Pulse 4 LOW  - Reset phase
      * Phase 7: Pulse 4 HIGH - Back to idle
      */
-    
-    switch (phase) {
+    if (!th) {
+        /* TH LOW: UP/DOWN always present, A/START on pins 6/9 */
+        if (ph == 4) {
+            /* Identification phase: all four direction lines LOW */
+            out &= ~((1 << PD2) | (1 << PD3) | (1 << PD4) | (1 << PD5));
+        } else {
+            if (BTN_UP())   out &= ~(1 << PD2);
+            if (BTN_DOWN()) out &= ~(1 << PD3);
+            out &= ~(1 << PD4); /* Ground on pin 3 */
+            out &= ~(1 << PD5); /* Ground on pin 4 */
+        }
 
-    case 0: // Pulse 1 LOW
-    case 2: // Pulse 2 LOW
-        /* UP and DOWN always available */
-        BTN_UP()   ? writeLo(PD2) : writeHi(PD2);
-        BTN_DOWN() ? writeLo(PD3) : writeHi(PD3);
-        /* LEFT/RIGHT grounded for 3-button compatibility */
-        writeLo(PD4);
-        writeLo(PD5);
-        /* A and START available */
-        BTN_A()     ? writeLo(PD6) : writeHi(PD6);
-        BTN_START() ? writeLo(PD7) : writeHi(PD7);
-        break;
+        if (BTN_A())     out &= ~(1 << PD6);
+        if (BTN_START()) out &= ~(1 << PD7);
+    } else {
+        /* TH HIGH: B/C always on pins 6/9 */
+        if (ph == 5) {
+            /* Extended 6-button read */
+            if (BTN_Z())    out &= ~(1 << PD2);  /* Z on pin 1 */
+            if (BTN_Y())    out &= ~(1 << PD3);  /* Y on pin 2 */
+            if (BTN_X())    out &= ~(1 << PD4);  /* X on pin 3 */
+            if (BTN_MODE()) out &= ~(1 << PD5);  /* MODE on pin 4 */
+        } else {
+            /* Normal directional read */
+            if (BTN_UP())    out &= ~(1 << PD2);
+            if (BTN_DOWN())  out &= ~(1 << PD3);
+            if (BTN_LEFT())  out &= ~(1 << PD4);
+            if (BTN_RIGHT()) out &= ~(1 << PD5);
+        }
 
-    case 1: // Pulse 1 HIGH
-    case 3: // Pulse 2 HIGH
-        /* Normal directional + B/C */
-        BTN_UP()    ? writeLo(PD2) : writeHi(PD2);
-        BTN_DOWN()  ? writeLo(PD3) : writeHi(PD3);
-        BTN_LEFT()  ? writeLo(PD4) : writeHi(PD4);
-        BTN_RIGHT() ? writeLo(PD5) : writeHi(PD5);
-        BTN_B()     ? writeLo(PD6) : writeHi(PD6);
-        BTN_C()     ? writeLo(PD7) : writeHi(PD7);
-        break;
-
-    case 4: // Pulse 3 LOW - IDENTIFICATION PHASE
-        /* ALL FOUR directional pins LOW for 6-button identification
-         * This tells the console we are a 6-button controller */
-        writeLo(PD2); // UP = LOW
-        writeLo(PD3); // DOWN = LOW
-        writeLo(PD4); // LEFT = LOW
-        writeLo(PD5); // RIGHT = LOW
-        /* A and START still available */
-        BTN_A()     ? writeLo(PD6) : writeHi(PD6);
-        BTN_START() ? writeLo(PD7) : writeHi(PD7);
-        break;
-
-    case 5: // Pulse 3 HIGH - X/Y/Z/MODE READABLE
-        /* X/Y/Z on directional pins, MODE on RIGHT pin */
-        BTN_Z()    ? writeLo(PD2) : writeHi(PD2);  // Z on UP pin (PIN 1)
-        BTN_Y()    ? writeLo(PD3) : writeHi(PD3);  // Y on DOWN pin (PIN 2)
-        BTN_X()    ? writeLo(PD4) : writeHi(PD4);  // X on LEFT pin (PIN 3)
-        BTN_MODE() ? writeLo(PD5) : writeHi(PD5);  // MODE on RIGHT pin (PIN 4)
-        BTN_B()    ? writeLo(PD6) : writeHi(PD6);  // B still available (PIN 6)
-        BTN_C()    ? writeLo(PD7) : writeHi(PD7);  // C still available (PIN 9)
-        break;
-
-    case 6: // Pulse 4 LOW - Reset phase
-        /* UP and DOWN available again */
-        BTN_UP()   ? writeLo(PD2) : writeHi(PD2);
-        BTN_DOWN() ? writeLo(PD3) : writeHi(PD3);
-        /* LEFT/RIGHT grounded */
-        writeLo(PD4);
-        writeLo(PD5);
-        /* A and START available */
-        BTN_A()     ? writeLo(PD6) : writeHi(PD6);
-        BTN_START() ? writeLo(PD7) : writeHi(PD7);
-        break;
-
-    case 7: // Pulse 4 HIGH - Back to idle/normal
-        /* Back to normal state - same as phases 1 and 3 */
-        BTN_UP()    ? writeLo(PD2) : writeHi(PD2);
-        BTN_DOWN()  ? writeLo(PD3) : writeHi(PD3);
-        BTN_LEFT()  ? writeLo(PD4) : writeHi(PD4);
-        BTN_RIGHT() ? writeLo(PD5) : writeHi(PD5);
-        BTN_B()     ? writeLo(PD6) : writeHi(PD6);
-        BTN_C()     ? writeLo(PD7) : writeHi(PD7);
-        break;
+        if (BTN_B()) out &= ~(1 << PD6);
+        if (BTN_C()) out &= ~(1 << PD7);
     }
+
+    /* Single, glitch-free update of the six data lines */
+    PORTD = (PORTD & ~SEGA_OUT_MASK) | out;
 }
 
 /* ================= Main ================= */
 
 int main(void)
 {
-    /* Disable ADC (digital I/O only) */
+    /* Digital I/O only: disable ADC and the analog comparator */
     ADCSRA &= ~(1 << ADEN);
+    ACSR   |=  (1 << ACD);
 
-    /* PD2–PD7 outputs */
-    DDRD |= (1 << PD2) | (1 << PD3) | (1 << PD4) |
-            (1 << PD5) | (1 << PD6) | (1 << PD7);
+    /* PD2–PD7 outputs, initialised to released (HIGH) */
+    DDRD  |= SEGA_OUT_MASK;
+    PORTD |= SEGA_OUT_MASK;
 
     /* TH input (PB7) - no pull-up needed, console drives it */
     DDRB &= ~(1 << PB7);
-    
+
     /* Button inputs: PB0-PB5 */
     DDRB &= ~((1 << PB0) | (1 << PB1) | (1 << PB2) | (1 << PB3) | (1 << PB4) | (1 << PB5));
     PORTB |= (1 << PB0) | (1 << PB1) | (1 << PB2) | (1 << PB3) | (1 << PB4) | (1 << PB5);  /* Enable pull-ups */
-    
+
     /* Button inputs: PC0-PC5 */
     DDRC &= ~((1 << PC0) | (1 << PC1) | (1 << PC2) | (1 << PC3) | (1 << PC4) | (1 << PC5));
     PORTC |= (1 << PC0) | (1 << PC1) | (1 << PC2) | (1 << PC3) | (1 << PC4) | (1 << PC5);  /* Enable pull-ups */
 
 #if defined(__AVR_ATmega8__)
     /* ---------- ATmega8 : Timer0 overflow ---------- */
-    /* F_CPU = 8 MHz
-     * Prescaler = 64
-     * Overflow period ≈ 2.048 ms
-     * idleTicks > 12 gives ~24.6 ms timeout
+    /* F_CPU = 8 MHz, prescaler = 8 -> 1 us/count
+     * Overflow period = 256 counts = 256 us (~0.25 ms)
+     * IDLE_TIMEOUT_TICKS x 256 us ~= 1.5 ms timeout
      */
-
-    TCCR0 = (1 << CS01) | (1 << CS00);   /* clk/64 */
+    TCCR0 = (1 << CS01);                 /* clk/8 */
     TCNT0 = 0;                           /* initialize counter */
     TIMSK |= (1 << TOIE0);               /* enable overflow interrupt */
-#elif defined(__AVR_ATmega88__) || defined(__AVR_ATmega88A__) || defined(__AVR_ATmega88PA__)
-    /* ---------- ATmega88 / ATmega88A / ATmega88PA / ATmega88PB ---------- */
-    /* F_CPU = 8 MHz
-    * Prescaler = 64
-    * OCR0A = 124 → 1 ms
-    */
-
+#elif defined(__AVR_ATmega88__)  || defined(__AVR_ATmega88A__) || \
+      defined(__AVR_ATmega88P__) || defined(__AVR_ATmega88PA__)
+    /* ---------- ATmega88 / 88A / 88P / 88PA ---------- */
+    /* F_CPU = 8 MHz, prescaler = 8, CTC
+     * OCR0A = 249 -> (249 + 1) * 1 us = 250 us (~0.25 ms) per tick
+     * IDLE_TIMEOUT_TICKS x 250 us = 1.5 ms timeout
+     */
     TCCR0A = (1 << WGM01);               /* CTC */
-    TCCR0B = (1 << CS01) | (1 << CS00);  /* clk/64 */
+    TCCR0B = (1 << CS01);                /* clk/8 */
     TCNT0  = 0;                          /* initialize counter */
-    OCR0A  = 124;
+    OCR0A  = 249;
     TIMSK0 = (1 << OCIE0A);
+#else
+#  error "Unsupported MCU: expected ATmega8 or ATmega88/88A/88P/88PA"
 #endif
 
     sei();
 
     while (1) {
-        sega_poll_th();
-        sega_output();
+        /* Sample TH exactly once per iteration so the phase advance and the
+         * data output always correspond to the same instant (no torn read
+         * across a fast TH edge). */
+        uint8_t th = th_level();
+        sega_poll_th(th);
+        sega_output(th);
     }
 }
