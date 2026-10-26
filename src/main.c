@@ -3,7 +3,7 @@
  * 3-button + proper 6-button extension
  * Emulates SEGA 315-5638 chip
  *
- * MCU: ATmega8 / ATmega88
+ * MCU: ATmega8 / ATmega48 / ATmega88 / ATmega168 / ATmega328
  * Clock: 8 MHz (internal)
  */
 
@@ -62,8 +62,9 @@ static volatile uint8_t idleTicks = 0;
  * otherwise a 3-button game that pulses TH once per frame drifts the phase
  * counter and eventually feeds it 6-button identification / X-Y-Z-MODE data.
  *
- * Both MCUs are configured for a ~0.25 ms timer tick, so IDLE_TIMEOUT_TICKS
- * gives the SAME real-world timeout (~1.5 ms) on every supported part.
+ * All supported MCUs are configured for a ~0.25 ms timer tick, so
+ * IDLE_TIMEOUT_TICKS gives the SAME real-world timeout (~1.5 ms) on every
+ * supported part.
  */
 #define IDLE_TIMEOUT_TICKS 6   /* 6 x ~0.25 ms ~= 1.5 ms */
 
@@ -196,10 +197,17 @@ int main(void)
     TCCR0 = (1 << CS01);                 /* clk/8 */
     TCNT0 = 0;                           /* initialize counter */
     TIMSK |= (1 << TOIE0);               /* enable overflow interrupt */
-#elif defined(__AVR_ATmega88__)  || defined(__AVR_ATmega88A__) || \
-      defined(__AVR_ATmega88P__) || defined(__AVR_ATmega88PA__)
-    /* ---------- ATmega88 / 88A / 88P / 88PA ---------- */
-    /* F_CPU = 8 MHz, prescaler = 8, CTC
+#elif defined(__AVR_ATmega48__)   || defined(__AVR_ATmega48A__)  || \
+      defined(__AVR_ATmega48P__)  || defined(__AVR_ATmega48PA__) || \
+      defined(__AVR_ATmega88__)   || defined(__AVR_ATmega88A__)  || \
+      defined(__AVR_ATmega88P__)  || defined(__AVR_ATmega88PA__) || \
+      defined(__AVR_ATmega168__)  || defined(__AVR_ATmega168A__) || \
+      defined(__AVR_ATmega168P__) || defined(__AVR_ATmega168PA__) || \
+      defined(__AVR_ATmega328__)  || defined(__AVR_ATmega328P__)
+    /* ---------- ATmega48/88/168/328 family (and A/P/PA variants) ----------
+     * These share the same Timer0 CTC peripheral (OCR0A/TIMSK0/OCIE0A) and
+     * port layout, so one code path covers the whole family.
+     * F_CPU = 8 MHz, prescaler = 8, CTC
      * OCR0A = 249 -> (249 + 1) * 1 us = 250 us (~0.25 ms) per tick
      * IDLE_TIMEOUT_TICKS x 250 us = 1.5 ms timeout
      */
@@ -209,7 +217,7 @@ int main(void)
     OCR0A  = 249;
     TIMSK0 = (1 << OCIE0A);
 #else
-#  error "Unsupported MCU: expected ATmega8 or ATmega88/88A/88P/88PA"
+#  error "Unsupported MCU: expected ATmega8 or ATmega48/88/168/328 (incl. A/P/PA variants)"
 #endif
 
     sei();

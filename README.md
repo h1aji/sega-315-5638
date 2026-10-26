@@ -1,6 +1,6 @@
 # Sega Mega Drive 6-Button Controller ASIC Emulator
 
-**ATmega8 / ATmega88 – PlatformIO**
+**ATmega8 / ATmega48 / ATmega88 / ATmega168 / ATmega328 – PlatformIO**
 
 ## Overview
 
@@ -38,7 +38,7 @@ Primary sources used for implementation:
 * ✔ Automatic fallback to **3-button mode** after 12ms timeout
 * ✔ Proper handling of **shared / multiplexed data lines**
 * ✔ Active-LOW Sega signaling
-* ✔ Runs on **ATmega8 or ATmega88**
+* ✔ Runs on **ATmega8, ATmega48, ATmega88, ATmega168, or ATmega328**
 * ✔ Bare-metal **avr-gcc / PlatformIO** implementation
 
 ---
@@ -93,9 +93,16 @@ When phase counter reaches 8, it resets to 0 and sets the `isSix` flag, indicati
 ## Supported Microcontrollers
 
 * **ATmega8**
-* **ATmega88 / 88P / 88PA**
+* **ATmega48 / 48A / 48P / 48PA**
+* **ATmega88 / 88A / 88P / 88PA**
+* **ATmega168 / 168A / 168P / 168PA**
+* **ATmega328 / 328P**
 
-The code automatically adapts using compile-time detection.
+The code automatically adapts using compile-time detection (`__AVR_ATmegaXX__`
+macros provided by the toolchain). ATmega48/88/168/328 share the same Timer0
+CTC peripheral and port layout, so they use one common code path; only the
+ATmega8 (which has a Timer0 overflow-only peripheral, no CTC/`OCR0A`) needs a
+separate branch.
 
 All analog functionality is **explicitly disabled** so every pin operates as **digital I/O only**.
 
@@ -103,7 +110,7 @@ All analog functionality is **explicitly disabled** so every pin operates as **d
 
 ## Hardware Requirements
 
-* ATmega8 or ATmega88
+* ATmega8, ATmega48, ATmega88, ATmega168, or ATmega328
 * 8 MHz clock (internal RC recommended)
 * Sega Mega Drive / Genesis DB9 controller port
 * 12 pushbuttons (or other input source)
@@ -207,21 +214,26 @@ Loop execution is fast enough (~1-2µs) to respond to console pulses (4-7µs).
 
 ### Build
 
+The default environment is `ATmega8`. To build for a different chip, pass
+`-e` with one of the environments defined in `platformio.ini`
+(`ATmega8`, `ATmega48`, `ATmega88`, `ATmega168`, `ATmega328`):
+
 ```bash
-pio run
+pio run                 # builds the default environment (ATmega8)
+pio run -e ATmega328    # builds for a specific chip
 ```
 
 ### Upload
 
 ```bash
-pio run --target upload
+pio run -e ATmega328 --target upload
 ```
 
 ### Fuse Settings
 
-For ATmega8 at 8MHz internal:
+For 8MHz internal clock on any supported chip:
 ```bash
-pio run --target fuses
+pio run -e ATmega328 --target fuses
 ```
 
 ---
@@ -262,7 +274,7 @@ To verify correct operation:
 - Correct 6-button identification sequence (all 4 pins LOW in phase 4)
 - Proper shared-pin multiplexing behavior
 - Safe for real consoles
-- ATmega8 & ATmega88 compatible
+- ATmega8, ATmega48, ATmega88, ATmega168 & ATmega328 compatible
 - Tested timing requirements (4-7µs pulses, 20ms polling)
 
 ---
